@@ -259,8 +259,59 @@ namespace FrostyHeadless
 
         // ---------------------------------------------------------------- HTTP
 
+        /// <summary>
+        /// 蔚蓝档案启动标：控制台支持 VT 时打印真彩像素画（BaLogo.Art，半块字符），
+        /// 不支持 VT 的老 conhost 退回文字版（假名依字体而定，不影响功能）。
+        /// </summary>
+        private static void PrintBaLogo()
+        {
+            if (TryEnableVt())
+            {
+                Console.WriteLine();
+                foreach (string line in BaLogo.Art)
+                    Console.WriteLine(line);
+                return;
+            }
+
+            ConsoleColor prev = Console.ForegroundColor;
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("    ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·");
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("                ブルーアーカイブ");
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("    ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·  ✦  ·");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("                  ✟ FrostyHeadless ✟");
+            Console.ForegroundColor = prev;
+        }
+
+        // ---- 控制台 VT（真彩 ANSI）支持探测 ----
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+        private static bool TryEnableVt()
+        {
+            try
+            {
+                IntPtr h = GetStdHandle(-11); // STD_OUTPUT_HANDLE
+                uint mode;
+                if (!GetConsoleMode(h, out mode)) return false; // 输出被重定向（无控制台）
+                return SetConsoleMode(h, mode | 0x0004); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            }
+            catch { return false; }
+        }
+
         private static void PrintWaitingBanner(int port)
         {
+            PrintBaLogo();
             Console.WriteLine();
             Console.WriteLine("==============================================================");
             Console.WriteLine("  FrostyHeadless 只读服务器已监听（尚未加载游戏）");
