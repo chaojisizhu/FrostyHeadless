@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
+
+  <!--
+    FrostyHeadless: Frosty Toolsuite v1.0.6.3 headless read-only query CLI.
+    References Frosty assemblies from the install dir (default ../FrostyEditor/) with Private=false;
+    at runtime they are resolved from the install dir via AppDomain.AssemblyResolve, so the exe can
+    run from bin/ (pass the frosty-dir option) or be dropped into the install dir for zero-arg use.
+    UseWPF only satisfies the FrostyCore/FrostySdk dependency chain (api-cheatsheet section 6);
+    this project never creates any UI.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>FrostyHeadless</RootNamespace>
+    <AssemblyName>FrostyHeadless</AssemblyName>
+    <GenerateAssemblyConfigurationAttribute>false</GenerateAssemblyConfigurationAttribute>
+    <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
+    <GenerateAssemblyProductAttribute>false</GenerateAssemblyProductAttribute>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="FrostySdk">
+      <HintPath>..\FrostyEditor\FrostySdk.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="FrostyCore">
+      <HintPath>..\FrostyEditor\FrostyCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="FrostyHash">
+      <HintPath>..\FrostyEditor\FrostyHash.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+
+</Project>
