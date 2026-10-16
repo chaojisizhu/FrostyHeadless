@@ -178,9 +178,11 @@ namespace FrostyHeadless
 
 常驻服务器（推荐，加载一次缓存后毫秒级响应）:
   FrostyHeadless serve [--profile <p>] [--port <18765>]
-  不带 --profile 时在终端里交互选择游戏（已配置的排前面，回车取默认）。
+  启动后【立即开放接口】（未加载游戏时 /status 与 /profiles 可用，其余返回 409）：
+  人可以在终端交互选择游戏（已配置的排前面，回车取默认）；
+  AI 可随时调用 GET /load?profile=<名>[&gamepath=<目录>] 自行加载（谁先来谁生效）。
   接口（GET，根地址 http://127.0.0.1:<port>/）:
-    /status   /profiles
+    /status   /profiles   /load?profile=&gamepath=
     /ebx/search?filter=&type=&limit=&offset=    /ebx/get?name=
     /ebx/xml?name=（XML 响应体）    /ebx/deps?name=
     /bundles/list?filter=&limit=    /bundle/info?name=

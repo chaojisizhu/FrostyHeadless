@@ -7,57 +7,31 @@ using System.Linq;
 using System.Net;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using FrostySdk;
 using FrostySdk.Managers;
 
 namespace FrostyHeadless
 {
     /// <summary>
-    /// 常驻只读服务器：终端里选游戏 → 一次性加载缓存 → 在 127.0.0.1 上提供 JSON/HTTP 查询接口，
-    /// 直到终端窗口被关闭（或 Ctrl+C）。单线程串行处理请求（AssetManager 非线程安全），
-    /// 全程零文件写入——XML 以响应体返回，不提供任何落盘端点。
+    /// 常驻只读服务器：**接口先行，游戏后挂**——启动即监听 127.0.0.1，此时处于 unloaded 状态；
+    /// 人可以在终端交互选游戏（像原版编辑器），AI 也可以随时 POST/GET /load?profile=<名> 自己挂载，
+    /// 谁先来谁生效。加载完成后提供 JSON/HTTP 查询，直到终端窗口被关闭（或 Ctrl+C）。
+    /// 单线程串行处理请求（AssetManager 非线程安全）；全程零文件写入。
     /// </summary>
     internal static class Server
     {
+        private sealed class ServerState
+        {
+            internal readonly object Lock = new object();
+            /// <summary>null = 未加载任何游戏；加载/查询都在锁内进行。</summary>
+            internal RuntimeState Loaded;
+            internal bool Booting;
+        }
+
         internal static int Run(Cli cli)
         {
-            Boot.EnsureLightBoot(cli); // Profiles + Config，只读
-
-            // --profile 缺省时在终端交互选择（像原版编辑器的启动选择窗口）
-            if (string.IsNullOrEmpty(cli.Get("profile")))
-            {
-                string picked = PickProfileInteractive();
-                if (picked == null)
-                {
-                    Console.Error.WriteLine("[ERROR] 未选择游戏，退出。");
-                    return 1;
-                }
-                cli.Opts["profile"] = picked;
-            }
-
-            // 先验证 profile 合法再问目录：未知 profile 应立刻报错，而不是误导用户去输游戏目录。
-            // 注意必须用 HasProfile 而不是看 Initialize 的返回值：Profile 是 struct，
-            // Initialize 内部 profiles.Find 找不到时返回 default(Profile) 而非 null，
-            // 包装成 Profile? 后 HasValue 恒为 true —— Initialize 对任何名字都返回 true（Frosty 自身的坑）。
-            // HasProfile 用 FindIndex 判定，语义正确。
-            if (!ProfilesLibrary.HasProfile(cli.Get("profile")))
-                throw new CliException(3, "未知 profile: " + cli.Get("profile") + "（用 /profiles 端点或 profiles list 查看全部）");
-
-            // 该 profile 未配置过 GamePath 且未用 --gamepath 覆盖 → 当场输入目录（不回写配置）
-            if (string.IsNullOrEmpty(cli.Get("gamepath")) && !IsProfileConfigured(cli.Get("profile")))
-            {
-                Console.WriteLine();
-                Console.WriteLine("该游戏还没有配置过游戏目录（原版编辑器的 %LocalAppData%\\Frosty\\editor_config.json 里没有它）。");
-                Console.Write("请输入游戏安装目录（留空取消）: ");
-                string dir = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(dir)) { Console.Error.WriteLine("[ERROR] 未提供游戏目录，退出。"); return 1; }
-                cli.Opts["gamepath"] = dir.Trim();
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("正在加载游戏数据（已有缓存则数秒，首次会重建缓存、可能需要几分钟）……");
-            Console.Error.WriteLine("[INFO] boot: profile=" + cli.Get("profile"));
-            RuntimeState st = Boot.EnsureFullBoot(cli); // 唯一一次重负载
+            Boot.EnsureLightBoot(cli); // Profiles + Config，只读、亚秒级：保证 /profiles 一开始就能用
 
             int port = ParsePort(cli.Get("port"));
             HttpListener listener = new HttpListener();
@@ -68,31 +42,114 @@ namespace FrostyHeadless
                 throw new CliException(3, "无法监听 127.0.0.1:" + port + "（端口被占用？用 --port 换一个）: " + ex.Message);
             }
 
+            ServerState ss = new ServerState();
             DateTime started = DateTime.Now;
-            long served = 0;
-            PrintBanner(st, port);
+            PrintWaitingBanner(port);
 
-            while (listener.IsListening)
+            // 请求线程：立即对外服务（unloaded 状态下 /status 与 /profiles 可用，其余返回 409）
+            Thread worker = new Thread(delegate() { ListenLoop(cli, ss, listener, started); });
+            worker.IsBackground = true;
+            worker.Start();
+
+            // 主线程：人机交互（不阻塞接口）
+            string presetProfile = cli.Get("profile");
+            if (!string.IsNullOrEmpty(presetProfile))
             {
-                HttpListenerContext ctx;
-                try { ctx = listener.GetContext(); }
-                catch (Exception) { break; } // 监听器被关闭（进程退出）
-
-                served++;
-                Stopwatch sw = Stopwatch.StartNew();
-                int status;
-                long bytes;
-                try { status = Handle(ctx, cli, st, served, started); bytes = ctx.Response.ContentLength64; }
-                catch (Exception ex) { status = WriteError(ctx.Response, 500, 5, ex.ToString()); bytes = 0; }
-                finally
-                {
-                    try { ctx.Response.Close(); } catch { }
-                }
-                sw.Stop();
-                Console.Error.WriteLine("[{0:HH:mm:ss}] {1} {2} -> {3} ({4} ms) #{5}",
-                    DateTime.Now, ctx.Request.HttpMethod, ctx.Request.Url.PathAndQuery, status, sw.ElapsedMilliseconds, served);
+                TryBoot(cli, ss, presetProfile); // --profile 直启：仍先开接口再加载
             }
+            else
+            {
+                string picked = PickProfileInteractive();
+                if (picked == null)
+                {
+                    Console.Error.WriteLine("[INFO] 终端未选择游戏，服务器保持 unloaded，等待 /load 接口调用。");
+                }
+                else
+                {
+                    lock (ss.Lock)
+                    {
+                        if (ss.Loaded != null)
+                        {
+                            Console.Error.WriteLine("[INFO] 已由接口加载 " + ss.Loaded.Profile + "，忽略本次终端选择: " + picked);
+                            picked = null;
+                        }
+                        else if (ss.Booting)
+                        {
+                            Console.Error.WriteLine("[INFO] 接口正在加载游戏，忽略本次终端选择: " + picked);
+                            picked = null;
+                        }
+                    }
+                    if (picked != null)
+                    {
+                        if (!IsProfileConfigured(picked) && string.IsNullOrEmpty(cli.Get("gamepath")))
+                            PromptGamePathInto(cli); // 选了未配置的游戏：当场问目录（不回写配置）
+                        string err = TryBoot(cli, ss, picked);
+                        if (err != null) Console.Error.WriteLine("[ERROR] " + err);
+                    }
+                }
+            }
+
+            // 保持进程存活（窗口关闭/Ctrl+C 即退出）
+            while (listener.IsListening)
+                Thread.Sleep(500);
             return 0;
+        }
+
+        // ---------------------------------------------------------------- 加载游戏（终端与 /load 共用）
+
+        /// <summary>加载一个游戏（幂等：已加载同一游戏直接返回；加载中则等待）。返回错误消息或 null。</summary>
+        private static string TryBoot(Cli cli, ServerState ss, string profile)
+        {
+            lock (ss.Lock)
+            {
+                if (ss.Loaded != null)
+                {
+                    if (!ss.Loaded.Profile.Equals(profile, StringComparison.OrdinalIgnoreCase))
+                        return "本进程已加载 " + ss.Loaded.Profile + "（一个进程只能加载一个游戏，换游戏请重启后再选）";
+                    return null; // 已是该游戏，幂等成功
+                }
+                while (ss.Booting)
+                    Monitor.Wait(ss.Lock);
+                if (ss.Loaded != null) // 别人在等待期间完成了加载
+                {
+                    if (!ss.Loaded.Profile.Equals(profile, StringComparison.OrdinalIgnoreCase))
+                        return "本进程已加载 " + ss.Loaded.Profile;
+                    return null;
+                }
+
+                ss.Booting = true;
+            }
+            try
+            {
+                Console.Error.WriteLine("[INFO] boot: profile=" + profile);
+                // 用临时 Cli 携带 profile/gamepath，复用 EnsureFullBoot 的全部校验与防线
+                Cli bootCli = Cli.ForServer("serve", "run", new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+                bootCli.Opts["profile"] = profile;
+                string gp = cli.Get("gamepath");
+                if (!string.IsNullOrEmpty(gp)) bootCli.Opts["gamepath"] = gp;
+
+                RuntimeState st = Boot.EnsureFullBoot(bootCli);
+                lock (ss.Lock)
+                {
+                    ss.Loaded = st;
+                    ss.Booting = false;
+                    Monitor.PulseAll(ss.Lock);
+                }
+                PrintLoadedBanner(st);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                lock (ss.Lock)
+                {
+                    ss.Booting = false;
+                    Monitor.PulseAll(ss.Lock);
+                }
+                int code = ex is CliException ? ((CliException)ex).ExitCode : (ex is GuardException ? ((GuardException)ex).ExitCode : 5);
+                string msg = ex.Message;
+                Console.Error.WriteLine("[ERROR] 加载失败 (" + profile + "): " + msg);
+                return "加载失败 (" + profile + "): " + msg + (code == 3 ? "" : "（code=" + code + "）");
+            }
         }
 
         // ---------------------------------------------------------------- 交互选游戏
@@ -106,7 +163,7 @@ namespace FrostyHeadless
 
         /// <summary>
         /// 终端里列出全部支持的 profile（已配置的排前面并标记），按序号或名字选择，回车取默认。
-        /// 数据来源与 /profiles 端点一致：ProfilesLibrary 私有 profiles + Config.Current.Games。
+        /// 与 /profiles 端点同一数据源：ProfilesLibrary 私有 profiles + Config.Current.Games。
         /// </summary>
         private static string PickProfileInteractive()
         {
@@ -134,14 +191,13 @@ namespace FrostyHeadless
                 }
                 rows.Add(row);
             }
-            // 已配置在前、名字排序；无任何已配置时默认第一个
             List<ProfileRow> ordered = rows
                 .OrderByDescending(r => r.Configured)
                 .ThenBy(r => r.Profile.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
             Console.WriteLine();
-            Console.WriteLine("=== FrostyHeadless 只读服务器：选择要加载的游戏 ===");
+            Console.WriteLine("=== FrostyHeadless 只读服务器：选择要加载的游戏（接口已开放，也可由 AI 调 /load 加载）===");
             for (int i = 0; i < ordered.Count; i++)
             {
                 ProfileRow r = ordered[i];
@@ -152,10 +208,10 @@ namespace FrostyHeadless
             int defIdx = ordered.FindIndex(r => r.Configured);
             if (defIdx < 0) defIdx = 0;
             Console.WriteLine();
-            Console.Write("输入序号或 profile 名（回车 = {0}）: ", ordered[defIdx].Profile.Name);
+            Console.Write("输入序号或 profile 名（回车 = {0}，留空等待 AI 调用: ）: ", ordered[defIdx].Profile.Name);
 
             string line = Console.ReadLine();
-            if (line == null) return null; // stdin 重定向且无输入（无终端场景应改用 --profile）
+            if (line == null) return null; // stdin 无输入（如无终端）：保持 unloaded 等接口
             line = line.Trim();
             if (line.Length == 0) return ordered[defIdx].Profile.Name;
 
@@ -166,7 +222,7 @@ namespace FrostyHeadless
             ProfileRow match = ordered.FirstOrDefault(r => r.Profile.Name.Equals(line, StringComparison.OrdinalIgnoreCase));
             if (match != null) return match.Profile.Name;
 
-            Console.Error.WriteLine("[ERROR] 无效选择: " + line);
+            Console.Error.WriteLine("[ERROR] 无效选择: " + line + "（保持 unloaded，等待 /load）");
             return null;
         }
 
@@ -177,12 +233,19 @@ namespace FrostyHeadless
             foreach (var kv in games)
             {
                 if (kv.Key != null && kv.Key.Equals(profileName, StringComparison.OrdinalIgnoreCase))
-                {
-                    // 配置里必须有有效 GamePath 才算已配置
                     return kv.Value != null && !string.IsNullOrEmpty(kv.Value.GamePath);
-                }
             }
             return false;
+        }
+
+        /// <summary>选了未配置的游戏时在终端问游戏目录，塞进 cli 的 gamepath（不回写配置）。</summary>
+        private static void PromptGamePathInto(Cli cli)
+        {
+            Console.WriteLine();
+            Console.WriteLine("该游戏还没有配置过游戏目录（原版编辑器的 %LocalAppData%\\Frosty\\editor_config.json 里没有它）。");
+            Console.Write("请输入游戏安装目录（留空取消）: ");
+            string dir = Console.ReadLine();
+            if (!string.IsNullOrWhiteSpace(dir)) cli.Opts["gamepath"] = dir.Trim();
         }
 
         private static int ParsePort(string v)
@@ -196,45 +259,81 @@ namespace FrostyHeadless
 
         // ---------------------------------------------------------------- HTTP
 
-        private static void PrintBanner(RuntimeState st, int port)
+        private static void PrintWaitingBanner(int port)
         {
             Console.WriteLine();
             Console.WriteLine("==============================================================");
-            Console.WriteLine("  FrostyHeadless 只读服务器已启动（保持本窗口开启即在线）");
+            Console.WriteLine("  FrostyHeadless 只读服务器已监听（尚未加载游戏）");
             Console.WriteLine("  接口根地址:  http://127.0.0.1:" + port + "/");
-            Console.WriteLine("  已加载:       " + st.Profile + "  (" + ProfilesLibrary.DisplayName + ")");
-            Console.WriteLine("  游戏目录:     " + st.GamePath);
-            Console.WriteLine("  关闭本窗口或 Ctrl+C 即停止服务");
-            Console.WriteLine("--------------------------------------------------------------");
-            Console.WriteLine("  GET /status                    服务器状态");
-            Console.WriteLine("  GET /profiles                  全部支持的 profile");
-            Console.WriteLine("  GET /ebx/search?filter=&type=&limit=&offset=");
-            Console.WriteLine("  GET /ebx/get?name=<资产名>");
-            Console.WriteLine("  GET /ebx/xml?name=<资产名>     （返回 XML 响应体）");
-            Console.WriteLine("  GET /ebx/deps?name=<资产名>");
-            Console.WriteLine("  GET /bundles/list?filter=&limit=");
-            Console.WriteLine("  GET /bundle/info?name=<bundle名>");
-            Console.WriteLine("  GET /res/search?filter=&type=&limit=&offset=");
+            Console.WriteLine("  · 在本终端选择游戏，或由 AI 调用 GET /load?profile=<名>");
+            Console.WriteLine("  · /profiles 可列出全部支持的游戏（configured=true 的可直接加载）");
+            Console.WriteLine("  · 关闭本窗口或 Ctrl+C 即停止服务");
             Console.WriteLine("==============================================================");
             Console.WriteLine();
         }
 
+        private static void PrintLoadedBanner(RuntimeState st)
+        {
+            Console.WriteLine();
+            Console.WriteLine("==============================================================");
+            Console.WriteLine("  已加载: " + st.Profile + "  (" + ProfilesLibrary.DisplayName + ")");
+            Console.WriteLine("  游戏目录: " + st.GamePath);
+            Console.WriteLine("  GET /status | /profiles | /ebx/search | /ebx/get | /ebx/xml");
+            Console.WriteLine("  GET /ebx/deps | /bundles/list | /bundle/info | /res/search");
+            Console.WriteLine("==============================================================");
+            Console.WriteLine();
+        }
+
+        private static void ListenLoop(Cli cli, ServerState ss, HttpListener listener, DateTime started)
+        {
+            long served = 0;
+            while (listener.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = listener.GetContext(); }
+                catch (Exception) { break; }
+
+                served++;
+                Stopwatch sw = Stopwatch.StartNew();
+                int status;
+                try { status = Handle(ctx, cli, ss, listener, served, started); }
+                catch (Exception ex) { status = WriteError(ctx.Response, 500, 5, ex.ToString()); }
+                finally
+                {
+                    try { ctx.Response.Close(); } catch { }
+                }
+                sw.Stop();
+                Console.Error.WriteLine("[{0:HH:mm:ss}] {1} {2} -> {3} ({4} ms) #{5}",
+                    DateTime.Now, ctx.Request.HttpMethod, ctx.Request.Url.PathAndQuery, status, sw.ElapsedMilliseconds, served);
+            }
+        }
+
         /// <summary>处理一个请求。返回 HTTP 状态码。</summary>
-        private static int Handle(HttpListenerContext ctx, Cli cli, RuntimeState st, long served, DateTime started)
+        private static int Handle(HttpListenerContext ctx, Cli cli, ServerState ss, HttpListener listener, long served, DateTime started)
         {
             string path = (ctx.Request.Url.AbsolutePath ?? "/").TrimEnd('/');
             if (path.Length == 0) path = "/";
             NameValueCollection q = ctx.Request.QueryString;
 
+            // 不需要游戏数据的端点
+            if (path == "/" || path == "/status")
+                return WriteStatus(ctx.Response, ss, served, started);
+            if (path == "/profiles")
+                return WriteJson(ctx.Response, 200, tw => Commands.ProfilesList(cli, tw));
+            if (path == "/load")
+                return HandleLoad(ctx, cli, ss, q);
+
+            // 以下端点需要已加载游戏
+            RuntimeState st;
+            lock (ss.Lock) { st = ss.Loaded; }
+            if (st == null)
+            {
+                return WriteError(ctx.Response, 409, 3,
+                    "尚未加载游戏。GET /load?profile=<名>[&gamepath=<目录>] 加载（/profiles 查看列表）；终端里也可以选择。");
+            }
+
             switch (path)
             {
-                case "/":
-                case "/status":
-                    return WriteStatus(ctx.Response, st, served, started);
-
-                case "/profiles":
-                    return WriteJson(ctx.Response, 200, tw => Commands.ProfilesList(cli, tw));
-
                 case "/ebx/search":
                     return WriteJson(ctx.Response, 200, tw => Commands.EbxSearch(ForQuery("ebx", "search", q), st, tw));
 
@@ -261,6 +360,48 @@ namespace FrostyHeadless
             }
         }
 
+        /// <summary>/load?profile=<名>[&gamepath=<目录>]：同步加载（有缓存时数秒~数十秒），完成后返回。</summary>
+        private static int HandleLoad(HttpListenerContext ctx, Cli cli, ServerState ss, NameValueCollection q)
+        {
+            string profile = q["profile"];
+            if (string.IsNullOrEmpty(profile))
+                return WriteError(ctx.Response, 400, 1, "缺少必选参数: profile（/load?profile=bf1；列表见 /profiles）");
+
+            if (!ProfilesLibrary.HasProfile(profile))
+                return WriteError(ctx.Response, 404, 3, "未知 profile: " + profile + "（用 /profiles 查看全部）");
+
+            if (string.IsNullOrEmpty(q["gamepath"]) && string.IsNullOrEmpty(cli.Get("gamepath")) && !IsProfileConfigured(profile))
+                return WriteError(ctx.Response, 400, 3,
+                    "profile " + profile + " 未配置过游戏目录，请带 &gamepath=<游戏安装目录> 调用（不会回写配置）");
+
+            if (!string.IsNullOrEmpty(q["gamepath"]))
+            {
+                // 把接口传入的 gamepath 塞进本次启动上下文（仅本进程内生效）
+                cli.Opts["gamepath"] = q["gamepath"];
+            }
+
+            Stopwatch sw = Stopwatch.StartNew();
+            string err = TryBoot(cli, ss, profile);
+            sw.Stop();
+            if (err != null)
+                return WriteError(ctx.Response, 409, 3, err);
+
+            RuntimeState st;
+            lock (ss.Lock) { st = ss.Loaded; }
+            return WriteJson(ctx.Response, 200, tw =>
+            {
+                JsonWriter jw = new JsonWriter(tw);
+                jw.BeginObject();
+                jw.Key("loaded"); jw.Bool(true);
+                jw.Key("profile"); jw.String(st.Profile);
+                jw.Key("displayName"); jw.String(ProfilesLibrary.DisplayName);
+                jw.Key("gamePath"); jw.String(st.GamePath);
+                jw.Key("loadMs"); jw.Number(sw.ElapsedMilliseconds);
+                jw.EndObject();
+                jw.Flush();
+            });
+        }
+
         /// <summary>把 HTTP 查询参数包成 Cli，让服务器与 CLI 共享同一套参数解析与校验。</summary>
         private static Cli ForQuery(string noun, string verb, NameValueCollection q)
         {
@@ -274,22 +415,36 @@ namespace FrostyHeadless
             return Cli.ForServer(noun, verb, opts);
         }
 
-        private static int WriteStatus(HttpListenerResponse resp, RuntimeState st, long served, DateTime started)
+        private static int WriteStatus(HttpListenerResponse resp, ServerState ss, long served, DateTime started)
         {
-            int ebxCount = 0;
-            try { ebxCount = (int)st.AssetManager.GetEbxCount(); } catch { }
-            int bundleCount = st.AssetManager.EnumerateBundles().Count();
+            RuntimeState st;
+            lock (ss.Lock) { st = ss.Loaded; }
+
+            int ebxCount = 0, bundleCount = 0;
+            if (st != null)
+            {
+                try { ebxCount = (int)st.AssetManager.GetEbxCount(); } catch { }
+                bundleCount = st.AssetManager.EnumerateBundles().Count();
+            }
 
             return WriteJson(resp, 200, tw =>
             {
                 JsonWriter jw = new JsonWriter(tw);
                 jw.BeginObject();
                 jw.Key("ok"); jw.Bool(true);
-                jw.Key("profile"); jw.String(st.Profile);
-                jw.Key("displayName"); jw.String(ProfilesLibrary.DisplayName);
-                jw.Key("gamePath"); jw.String(st.GamePath);
-                jw.Key("ebxCount"); jw.Number(ebxCount);
-                jw.Key("bundleCount"); jw.Number(bundleCount);
+                jw.Key("state"); jw.String(st == null ? "unloaded" : "loaded");
+                if (st != null)
+                {
+                    jw.Key("profile"); jw.String(st.Profile);
+                    jw.Key("displayName"); jw.String(ProfilesLibrary.DisplayName);
+                    jw.Key("gamePath"); jw.String(st.GamePath);
+                    jw.Key("ebxCount"); jw.Number(ebxCount);
+                    jw.Key("bundleCount"); jw.Number(bundleCount);
+                }
+                else
+                {
+                    jw.Key("hint"); jw.String("GET /load?profile=<名> 加载游戏；/profiles 列出全部支持的游戏");
+                }
                 jw.Key("startedAt"); jw.String(started.ToString("yyyy-MM-dd HH:mm:ss"));
                 jw.Key("uptimeSec"); jw.Number((long)(DateTime.Now - started).TotalSeconds);
                 jw.Key("requestsServed"); jw.Number(served);

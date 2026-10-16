@@ -10,7 +10,7 @@
 
 ## 亮点
 
-- **常驻服务器模式** —— 游戏数据索引启动时加载一次，之后的每次查询都在**个位数毫秒**内返回（一次性 CLI 进程每次调用都要付一遍缓存加载的成本）。
+- **接口先行的常驻服务器** —— 启动约 1 秒内 HTTP 接口即开始监听，**此时还没选游戏**。人可以在终端里慢慢选，AI agent 也可以随时 `GET /load?profile=<名>` 自己加载需要的游戏——谁先来谁生效。加载后每次查询**个位数毫秒**（一次性 CLI 进程每次调用都要付一遍缓存加载成本）。
 - **交互式游戏选择** —— 启动时终端列出你的 Frosty 安装支持的全部 profile（1.0.6.3 为 25 个游戏）；已在 Frosty 里配置过路径的游戏排前面并标注 `[已配置]`，回车即取默认。
 - **丰富的资产视图**
   - `ebx get` —— 完整对象树 JSON：每个实例带 `$type`/`$guid`，字段按声明序排列，`PointerRef`/`ResourceRef` 解析成可读的资产名与类名，深展开带环保护。
@@ -62,30 +62,39 @@ dotnet build FrostyHeadless/FrostyHeadless.csproj -c Release
 
 双击 `start-server.bat`（或运行 `FrostyHeadless.exe serve [--profile <名>] [--port <18765>]`）。
 
-不带 `--profile` 时进入交互选择：
+接口**立即**开始监听，此时处于 `unloaded` 状态——`/status` 报告状态，`/profiles` 已经可用。之后两边谁都可以选游戏：
+
+- **人**：终端显示交互选择（已配置的排前面）；选了未配置的游戏会当场提示输入安装目录。
+- **AI agent**：`GET /load?profile=bf1` 同步加载一个游戏（缓存热时约 1~2 秒；从未在 Frosty 里配置过的游戏加 `&gamepath=<目录>`）。重复加载同一游戏是幂等操作；往同一进程加载另一个游戏会报错（一个进程一个游戏，换游戏需重启）。
+
+加载完成前，游戏数据类端点返回 **409** 并附提示。加载完成后终端打印接口清单并记录每个请求。**窗口开着 = 服务器在线**；关窗或 Ctrl+C 即停止。
+
+交互选择（不带 `--profile` 时终端显示）：
 
 ```
-=== FrostyHeadless 只读服务器：选择要加载的游戏 ===
+=== FrostyHeadless 只读服务器：选择要加载的游戏（接口已开放，也可由 AI 调 /load 加载）===
    1. bf1  (Battlefield™ 1)  [已配置]
    2. Anthem  (Anthem™)  [需要密钥]
    3. bf4  (Battlefield™ 4)
    ...
-输入序号或 profile 名（回车 = bf1）:
+输入序号或 profile 名（回车 = bf1，留空等待 AI 调用: ）:
 ```
 
-一次性数据加载完成后，终端会打印接口清单并开始记录每个请求。**窗口开着 = 服务器在线**；关窗或 Ctrl+C 即停止。
+请求日志（每个请求一行，显示在终端）：
 
 ```
-[20:50:03] GET /ebx/search?filter=m1911&limit=3 -> 200 (39 ms) #3
-[20:50:03] GET /ebx/get?name=Gameplay/Weapons/... -> 200 (202 ms) #9
+[21:27:56] GET /status -> 200 (4 ms) #1
+[21:28:10] GET /load?profile=bf1 -> 200 (1617 ms) #4
+[21:28:12] GET /ebx/search?filter=m1911&limit=3 -> 200 (39 ms) #5
 ```
 
 ### HTTP 接口（均为 GET，根地址 `http://127.0.0.1:<port>/`）
 
 | 端点 | 说明 |
 | --- | --- |
-| `/status` | 服务器状态：已加载 profile、游戏目录、资产计数、已服务请求数 |
+| `/status` | 服务器状态：`state`（unloaded/loaded）、已加载 profile、游戏目录、资产计数、已服务请求数 |
 | `/profiles` | 安装支持的全部 profile（含已配置/需密钥标记） |
+| `/load?profile=<名>[&gamepath=<目录>]` | 向运行中的服务器加载一个游戏（同步，热缓存约 1~2 秒；同一游戏幂等） |
 | `/ebx/search?filter=&type=&limit=&offset=` | 子串检索（不区分大小写）；`type` 按基类匹配含子类；支持分页 |
 | `/ebx/get?name=<资产>` | 完整对象树 JSON |
 | `/ebx/xml?name=<资产>` | 同一资产的 XML（`application/xml` 响应体） |

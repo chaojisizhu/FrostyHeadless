@@ -12,7 +12,7 @@ Built for scripting, batch analysis and AI-agent workflows: point an agent at `h
 
 ## Highlights
 
-- **Resident server mode** — the game data index is loaded once at startup; every query after that answers in **single-digit milliseconds** (a one-shot CLI process pays the full cache-load cost on every invocation).
+- **Interface-first resident server** — the HTTP API is listening within ~1s of launch, *before* any game is picked. A human can choose a game in the terminal, or an AI agent can load what it needs itself via `GET /load?profile=<name>` — whoever comes first wins. Queries answer in **single-digit milliseconds** once loaded (a one-shot CLI process pays the full cache-load cost on every invocation).
 - **Interactive game picker** — on startup the terminal lists every profile your Frosty install supports (25 games for 1.0.6.3); games you have already configured in Frosty are sorted first and tagged `[已配置]`, Enter picks the default.
 - **Rich asset views**
   - `ebx get` — full object graph as JSON: every instance with `$type`/`$guid`, fields in declaration order, `PointerRef`/`ResourceRef` resolved to readable asset names and class names, cycle-safe deep expansion.
@@ -64,30 +64,39 @@ At run time the tool locates the Frosty install by walking up from the exe (also
 
 Double-click `start-server.bat` (or run `FrostyHeadless.exe serve [--profile <name>] [--port <18765>]`).
 
-Without `--profile` you get the interactive picker:
+The API starts listening immediately in `unloaded` state — `/status` reports the state and `/profiles` already works. From there, either side can pick the game:
+
+- **Human**: the terminal shows the interactive picker (configured games first); for an unconfigured game it prompts for the install path.
+- **AI agent**: `GET /load?profile=bf1` loads a game synchronously (≈1–2s with a warm cache; add `&gamepath=<dir>` for a game that was never configured in Frosty). Loading the same game again is a no-op; loading a different one into the same process returns an error (one game per process — restart to switch).
+
+Game-data endpoints return **409** with a hint until a game is loaded. After loading, the terminal prints the endpoint cheat-sheet and logs every request. **Keep the window open to keep the server online**; close it (or Ctrl+C) to stop.
+
+The interactive picker (shown in the terminal when no `--profile` is passed):
 
 ```
-=== FrostyHeadless 只读服务器：选择要加载的游戏 ===
+=== FrostyHeadless 只读服务器：选择要加载的游戏（接口已开放，也可由 AI 调 /load 加载）===
    1. bf1  (Battlefield™ 1)  [已配置]
    2. Anthem  (Anthem™)  [需要密钥]
    3. bf4  (Battlefield™ 4)
    ...
-输入序号或 profile 名（回车 = bf1）:
+输入序号或 profile 名（回车 = bf1，留空等待 AI 调用: ）:
 ```
 
-After the one-time data load the terminal prints the endpoint cheat-sheet and starts logging every request. **Keep the window open to keep the server online**; close it (or Ctrl+C) to stop.
+Request log (one line per call, in the terminal):
 
 ```
-[20:50:03] GET /ebx/search?filter=m1911&limit=3 -> 200 (39 ms) #3
-[20:50:03] GET /ebx/get?name=Gameplay/Weapons/... -> 200 (202 ms) #9
+[21:27:56] GET /status -> 200 (4 ms) #1
+[21:28:10] GET /load?profile=bf1 -> 200 (1617 ms) #4
+[21:28:12] GET /ebx/search?filter=m1911&limit=3 -> 200 (39 ms) #5
 ```
 
 ### HTTP API (all GET, root `http://127.0.0.1:<port>/`)
 
 | Endpoint | Description |
 | --- | --- |
-| `/status` | Server status: loaded profile, game path, asset counts, requests served |
+| `/status` | Server status: `state` (unloaded/loaded), loaded profile, game path, asset counts, requests served |
 | `/profiles` | All profiles supported by the install (with configured/key flags) |
+| `/load?profile=<name>[&gamepath=<dir>]` | Load a game into the running server (synchronous, ≈1–2s warm; idempotent for the same game) |
 | `/ebx/search?filter=&type=&limit=&offset=` | Case-insensitive substring search; `type` matches base types incl. subclasses; paginated |
 | `/ebx/get?name=<asset>` | Full object graph as JSON |
 | `/ebx/xml?name=<asset>` | Same asset as XML (`application/xml` response body) |
