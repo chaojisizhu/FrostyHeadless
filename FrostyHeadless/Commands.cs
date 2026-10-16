@@ -47,6 +47,12 @@ namespace FrostyHeadless
                         RuntimeState st = Boot.EnsureFullBoot(cli);
                         return BundleInfo(cli, st, Console.Out);
                     }
+
+                case "res":
+                    {
+                        RuntimeState st = Boot.EnsureFullBoot(cli);
+                        return ResSearch(cli, st, Console.Out);
+                    }
             }
             throw new CliException(1, "未知的命令组合: " + cli.Noun + " " + cli.Verb);
         }
@@ -311,6 +317,63 @@ namespace FrostyHeadless
             }
             jw.EndArray();
             jw.Key("dependentCount"); jw.Number(dependents.Count);
+            jw.EndObject();
+            jw.Flush();
+            return 0;
+        }
+
+        // ---------------------------------------------------------------- res
+
+        /// <summary>
+        /// res 资源检索（贴图/网格等二进制资源的元信息；名字子串 + res 类型名子串过滤）。
+        /// 只列元数据：名字、类型、rid、所在 bundle——二进制本体导出不在只读范围内。
+        /// </summary>
+        internal static int ResSearch(Cli cli, RuntimeState st, TextWriter tw)
+        {
+            string filter = cli.Get("filter") ?? "";
+            string type = cli.Get("type") ?? "";
+            int limit = cli.LimitOrDefault(100);
+            int offset = ParseOffset(cli.Get("offset"));
+
+            int total = 0;
+            List<ResAssetEntry> picked = new List<ResAssetEntry>();
+            foreach (ResAssetEntry r in st.AssetManager.EnumerateRes())
+            {
+                if (filter.Length > 0 &&
+                    (r.Name == null || r.Name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0))
+                    continue;
+                if (type.Length > 0 &&
+                    (r.Type == null || r.Type.IndexOf(type, StringComparison.OrdinalIgnoreCase) < 0))
+                    continue;
+                if (total >= offset)
+                {
+                    total++;
+                    if (limit <= 0 || picked.Count < limit) picked.Add(r);
+                }
+                else total++;
+            }
+
+            JsonWriter jw = new JsonWriter(tw);
+            jw.BeginObject();
+            jw.Key("profile"); jw.String(st.Profile);
+            jw.Key("filter"); jw.String(filter.Length == 0 ? null : filter);
+            jw.Key("type"); jw.String(type.Length == 0 ? null : type);
+            jw.Key("offset"); jw.Number(offset);
+            jw.Key("limit"); jw.Number(limit);
+            jw.Key("total"); jw.Number(total);
+            jw.Key("returned"); jw.Number(picked.Count);
+            jw.Key("truncated"); jw.Bool(limit > 0 && total - offset > picked.Count);
+            jw.Key("results");
+            jw.BeginArray();
+            foreach (ResAssetEntry r in picked)
+            {
+                jw.BeginObject();
+                jw.Key("name"); jw.String(r.Name);
+                jw.Key("type"); jw.String(r.Type);
+                jw.Key("rid"); jw.String(r.ResRid.ToString("X16"));
+                jw.EndObject();
+            }
+            jw.EndArray();
             jw.EndObject();
             jw.Flush();
             return 0;

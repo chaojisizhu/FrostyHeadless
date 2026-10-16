@@ -92,6 +92,7 @@ dotnet build FrostyHeadless/FrostyHeadless.csproj -c Release
 | `/ebx/deps?name=<资产>` | 依赖 + 被依赖清单 |
 | `/bundles/list?filter=&limit=` | bundle 检索 |
 | `/bundle/info?name=<bundle>` | bundle 详情：`ebx`/`res`/`chunk` 计数 + 前 2000 个 ebx 名 |
+| `/res/search?filter=&type=&limit=&offset=` | res 资源（贴图/网格等）元信息检索，按名字与资源类型过滤 |
 
 示例：
 
@@ -116,6 +117,7 @@ FrostyHeadless ebx xml    --profile bf1 --name <资产> [--out <文件>]
 FrostyHeadless ebx deps   --profile bf1 --name <资产>
 FrostyHeadless bundles list --profile bf1 --filter win32 --limit 5
 FrostyHeadless bundle info  --profile bf1 --name <bundle>
+FrostyHeadless res search   --profile bf1 --filter <子串> [--type Texture] [--limit 20]
 ```
 
 全局选项：`--frosty <目录>`（安装目录）、`--gamepath <目录>`（本次覆盖，不回写配置）、`--verbose`。

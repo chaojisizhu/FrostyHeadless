@@ -124,6 +124,7 @@ namespace FrostyHeadless
             { "ebx", new HashSet<string>(StringComparer.Ordinal) { "search", "get", "xml", "deps" } },
             { "bundles", new HashSet<string>(StringComparer.Ordinal) { "list" } },
             { "bundle", new HashSet<string>(StringComparer.Ordinal) { "info" } },
+            { "res", new HashSet<string>(StringComparer.Ordinal) { "search" } },
             { "serve", new HashSet<string>(StringComparer.Ordinal) { "run" } }, // 单字命令：serve（无需第二个词）
         };
 
@@ -173,6 +174,7 @@ namespace FrostyHeadless
   FrostyHeadless ebx deps --name <资产名> --profile <p>
   FrostyHeadless bundles list --profile <p> [--filter <子串>] [--limit <n>]
   FrostyHeadless bundle info --name <bundle名> --profile <p>
+  FrostyHeadless res search --profile <p> [--filter <子串>] [--type <res类型>] [--limit <n>] [--offset <n>]
 
 常驻服务器（推荐，加载一次缓存后毫秒级响应）:
   FrostyHeadless serve [--profile <p>] [--port <18765>]
@@ -182,6 +184,7 @@ namespace FrostyHeadless
     /ebx/search?filter=&type=&limit=&offset=    /ebx/get?name=
     /ebx/xml?name=（XML 响应体）    /ebx/deps?name=
     /bundles/list?filter=&limit=    /bundle/info?name=
+    /res/search?filter=&type=&limit=&offset=
   关闭终端窗口或 Ctrl+C 即停止。服务器模式全程零文件写入。
 
 全局选项:

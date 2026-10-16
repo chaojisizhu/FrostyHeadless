@@ -94,6 +94,7 @@ After the one-time data load the terminal prints the endpoint cheat-sheet and st
 | `/ebx/deps?name=<asset>` | Dependencies + reverse dependencies |
 | `/bundles/list?filter=&limit=` | Bundle search |
 | `/bundle/info?name=<bundle>` | Bundle detail: `ebx`/`res`/`chunk` counts + first 2000 ebx names |
+| `/res/search?filter=&type=&limit=&offset=` | res asset (texture/mesh/etc.) metadata search by name and resource type |
 
 Examples:
 
@@ -118,6 +119,7 @@ FrostyHeadless ebx xml    --profile bf1 --name <asset> [--out <file>]
 FrostyHeadless ebx deps   --profile bf1 --name <asset>
 FrostyHeadless bundles list --profile bf1 --filter win32 --limit 5
 FrostyHeadless bundle info  --profile bf1 --name <bundle>
+FrostyHeadless res search   --profile bf1 --filter <substring> [--type Texture] [--limit 20]
 ```
 
 Global options: `--frosty <dir>` (install dir), `--gamepath <dir>` (one-shot override, never written back), `--verbose`.

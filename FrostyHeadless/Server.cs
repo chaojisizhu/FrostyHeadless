@@ -214,6 +214,7 @@ namespace FrostyHeadless
             Console.WriteLine("  GET /ebx/deps?name=<资产名>");
             Console.WriteLine("  GET /bundles/list?filter=&limit=");
             Console.WriteLine("  GET /bundle/info?name=<bundle名>");
+            Console.WriteLine("  GET /res/search?filter=&type=&limit=&offset=");
             Console.WriteLine("==============================================================");
             Console.WriteLine();
         }
@@ -251,6 +252,9 @@ namespace FrostyHeadless
 
                 case "/bundle/info":
                     return WriteJson(ctx.Response, 200, tw => Commands.BundleInfo(ForQuery("bundle", "info", q), st, tw));
+
+                case "/res/search":
+                    return WriteJson(ctx.Response, 200, tw => Commands.ResSearch(ForQuery("res", "search", q), st, tw));
 
                 default:
                     return WriteError(ctx.Response, 404, 2, "未知路径: " + path + "（接口清单见 /status 或启动横幅）");
