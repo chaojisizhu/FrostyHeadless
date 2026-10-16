@@ -1,3 +1,5 @@
+English | [简体中文](README.zh-CN.md)
+
 # FrostyHeadless
 
 **Headless, strictly read-only query layer for [Frosty Toolsuite](https://github.com/CadeEvs/FrostyToolsuite)** — browse, inspect and export Frostbite engine game assets as JSON/XML from the command line or a local HTTP API, without ever launching the Frosty GUI.
