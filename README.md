@@ -104,6 +104,11 @@ Request log (one line per call, in the terminal):
 | `/bundles/list?filter=&limit=` | Bundle search |
 | `/bundle/info?name=<bundle>` | Bundle detail: `ebx`/`res`/`chunk` counts + first 2000 ebx names |
 | `/res/search?filter=&type=&limit=&offset=` | res asset (texture/mesh/etc.) metadata search by name and resource type |
+| `/res/get?name=` or `?rid=<hex16>` | Single res resource metadata; textures include width/height/format/mip chain |
+| `/res/export?name=&format=png\|dds\|raw` | **Binary export**: textures → PNG (inline-decoded via DirectXTex) or DDS; any res → raw stream |
+| `/types/schema?name=<type>` | ebx type field schema (field/type/transient) |
+
+`/ebx/get` also accepts `?guid=` for reference-chain following, and `/res/*` accepts `?rid=` (the id found in `ResourceRef` fields of `/ebx/get` output).
 
 Examples:
 
@@ -115,6 +120,30 @@ curl "http://127.0.0.1:18765/bundle/info?name=win32/gameconfigurations/warsaw"
 ```
 
 Errors return a JSON body `{"error":{"code":..,"message":..}}` with HTTP 400 (bad parameter), 404 (unknown asset/bundle/path) or 500.
+
+## MCP server (for AI clients)
+
+[`mcp/frosty-mcp.mjs`](mcp/frosty-mcp.mjs) wraps the whole API as 15 MCP tools (`frosty_*`) with zero dependencies (Node 18+): texture exports come back as inline images, everything else as text.
+
+**Full lifecycle management built in**: if a tool is called while the server is down, the wrapper spawns `FrostyHeadless.exe serve` as a detached background process automatically (and waits for readiness); `frosty_server_stop` shuts it down via the server's `/shutdown` endpoint when you're done. Next tool call lifts it again — no human in the loop. Override the exe location with `FROSTY_EXE`.
+
+To register it in Claude Code (project `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "frosty": {
+      "command": "node",
+      "args": ["<ABSOLUTE_PATH>/mcp/frosty-mcp.mjs"],
+      "env": { "FROSTY_URL": "http://127.0.0.1:18765" }
+    }
+  }
+}
+```
+
+## For AI agents
+
+**If you are an AI agent reading this**: [`AGENTS.md`](AGENTS.md) is written for you — a self-setup guide covering how to check whether the server is running, start it yourself as a background process, load a game via `/load`, call the API, register the MCP server, and the hard read-only rules. Read that file before doing anything else.
 
 ## Usage — one-shot CLI
 
@@ -138,8 +167,8 @@ Exit codes: `0` ok · `1` usage error · `2` not found · `3` boot/config failur
 ## Limitations
 
 - One game per server process (the per-game type SDK is emitted at boot) — restart and pick another game to switch.
-- `res` / `chunk` binary export is not implemented (ebx query/export/analysis only).
-- Profiles that require an encryption key (`RequiresKey`, e.g. Battlefront II) are not supported yet.
+- Mesh/audio export is raw-bytes only (no FBX/EALayer3 transcoding); textures export to PNG/DDS.
+- Profiles that require an encryption key (`RequiresKey`, e.g. Battlefront II) are not supported.
 - After a game patch, the first launch rebuilds the data cache inside the Frosty install dir (same as the GUI editor); this can take minutes.
 
 ## Legal

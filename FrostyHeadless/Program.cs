@@ -124,13 +124,15 @@ namespace FrostyHeadless
             { "ebx", new HashSet<string>(StringComparer.Ordinal) { "search", "get", "xml", "deps" } },
             { "bundles", new HashSet<string>(StringComparer.Ordinal) { "list" } },
             { "bundle", new HashSet<string>(StringComparer.Ordinal) { "info" } },
-            { "res", new HashSet<string>(StringComparer.Ordinal) { "search" } },
+            { "res", new HashSet<string>(StringComparer.Ordinal) { "search", "get", "export" } },
+            { "types", new HashSet<string>(StringComparer.Ordinal) { "schema" } },
             { "serve", new HashSet<string>(StringComparer.Ordinal) { "run" } }, // 单字命令：serve（无需第二个词）
         };
 
         private static readonly HashSet<string> ValueOptions = new HashSet<string>(StringComparer.Ordinal)
         {
-            "profile", "name", "filter", "type", "limit", "offset", "out", "frosty", "gamepath", "port"
+            "profile", "name", "filter", "type", "limit", "offset", "out", "frosty", "gamepath", "port",
+            "guid", "rid", "format"
         };
 
         internal static Cli Parse(string[] args)
@@ -169,12 +171,15 @@ namespace FrostyHeadless
 一次性命令（每次调用都会重新加载缓存，慢）:
   FrostyHeadless profiles list
   FrostyHeadless ebx search --profile <p> [--filter <子串>] [--type <类型>] [--limit <n>] [--offset <n>]
-  FrostyHeadless ebx get --name <资产名> --profile <p>
+  FrostyHeadless ebx get [--name <资产名> | --guid <guid>] --profile <p>
   FrostyHeadless ebx xml --name <资产名> --profile <p> [--out <文件>]
   FrostyHeadless ebx deps --name <资产名> --profile <p>
   FrostyHeadless bundles list --profile <p> [--filter <子串>] [--limit <n>]
   FrostyHeadless bundle info --name <bundle名> --profile <p>
   FrostyHeadless res search --profile <p> [--filter <子串>] [--type <res类型>] [--limit <n>] [--offset <n>]
+  FrostyHeadless res get [--name <名> | --rid <16位hex>] --profile <p>
+  FrostyHeadless res export [--name <名> | --rid <16位hex>] [--format png|dds|raw] --profile <p> [--out <文件>]
+  FrostyHeadless types schema --name <类型名> --profile <p>
 
 常驻服务器（推荐，加载一次缓存后毫秒级响应）:
   FrostyHeadless serve [--profile <p>] [--port <18765>]
@@ -183,10 +188,13 @@ namespace FrostyHeadless
   AI 可随时调用 GET /load?profile=<名>[&gamepath=<目录>] 自行加载（谁先来谁生效）。
   接口（GET，根地址 http://127.0.0.1:<port>/）:
     /status   /profiles   /load?profile=&gamepath=
-    /ebx/search?filter=&type=&limit=&offset=    /ebx/get?name=
+    /ebx/search?filter=&type=&limit=&offset=    /ebx/get?name=（或 ?guid=）
     /ebx/xml?name=（XML 响应体）    /ebx/deps?name=
     /bundles/list?filter=&limit=    /bundle/info?name=
     /res/search?filter=&type=&limit=&offset=
+    /res/get?name=（或 ?rid=）    /res/export?name=&format=png|dds|raw
+    /types/schema?name=<类型名>
+    /shutdown 用完关闭服务器（AI/脚本生命周期管理，重启即恢复）
   关闭终端窗口或 Ctrl+C 即停止。服务器模式全程零文件写入。
 
 全局选项:

@@ -102,6 +102,11 @@ dotnet build FrostyHeadless/FrostyHeadless.csproj -c Release
 | `/bundles/list?filter=&limit=` | bundle 检索 |
 | `/bundle/info?name=<bundle>` | bundle 详情：`ebx`/`res`/`chunk` 计数 + 前 2000 个 ebx 名 |
 | `/res/search?filter=&type=&limit=&offset=` | res 资源（贴图/网格等）元信息检索，按名字与资源类型过滤 |
+| `/res/get?name=` 或 `?rid=<16位hex>` | 单个 res 资源元信息；贴图附带尺寸/格式/mip 链 |
+| `/res/export?name=&format=png\|dds\|raw` | **二进制导出**：贴图 → PNG（服务端经 DirectXTex 解码）或 DDS；任意 res → 原始流 |
+| `/types/schema?name=<类型名>` | ebx 类型字段 schema（字段名/类型/transient） |
+
+`/ebx/get` 也支持 `?guid=`（引用链跟随），`/res/*` 支持 `?rid=`（即 `/ebx/get` 输出里 ResourceRef 的 rid）。
 
 示例：
 
@@ -113,6 +118,30 @@ curl "http://127.0.0.1:18765/bundle/info?name=win32/gameconfigurations/warsaw"
 ```
 
 错误返回 JSON 体 `{"error":{"code":..,"message":..}}`，HTTP 状态码 400（参数错误）、404（资产/bundle/路径不存在）或 500。
+
+## MCP 服务器（给 AI 客户端）
+
+[`mcp/frosty-mcp.mjs`](mcp/frosty-mcp.mjs) 把全部接口包装成 15 个 MCP 工具（`frosty_*`），零依赖（Node 18+）：贴图导出以内联图片返回，其余为文本。
+
+**内置完整生命周期管理**：工具调用时服务器没在运行，封装层会自动把 `FrostyHeadless.exe serve` 作为分离后台进程拉起（并等待就绪）；用完调 `frosty_server_stop` 经服务器的 `/shutdown` 端点优雅关闭。下次调用又会自动拉起——全程无需人参与。exe 位置可用环境变量 `FROSTY_EXE` 覆盖。
+
+Claude Code 注册示例（项目 `.mcp.json`）：
+
+```json
+{
+  "mcpServers": {
+    "frosty": {
+      "command": "node",
+      "args": ["<绝对路径>/mcp/frosty-mcp.mjs"],
+      "env": { "FROSTY_URL": "http://127.0.0.1:18765" }
+    }
+  }
+}
+```
+
+## 给 AI 的话
+
+**如果你是一个正在阅读本文件的 AI agent**：请读 [`AGENTS.md`](AGENTS.md)——那是写给你的自助安装配置指南，涵盖如何检查服务器是否在运行、自己把它拉起为后台进程、用 `/load` 加载游戏、调用接口、给自己注册 MCP，以及必须遵守的只读红线。做任何事之前先读它。
 
 ## 用法 —— 一次性 CLI
 
@@ -135,8 +164,8 @@ FrostyHeadless res search   --profile bf1 --filter <子串> [--type Texture] [--
 
 ## 限制
 
-- 一个服务器进程只能加载一个游戏（每游戏的类型 SDK 在启动期生成）——换游戏需重启再选。
-- `res` / `chunk` 二进制导出未实现（仅 ebx 查询/导出/分析）。
+- 一个进程只能加载一个游戏（每游戏的类型 SDK 在启动期生成）——换游戏需重启再选。
+- 网格/音效导出仅原始字节（无 FBX/EALayer3 转码）；贴图可导出 PNG/DDS。
 - 需要加密密钥的 profile（`RequiresKey`，如 Battlefront II）暂不支持。
 - 游戏更新后首次启动会在 Frosty 安装目录内重建数据缓存（与 GUI 编辑器一致），耗时可达分钟级。
 

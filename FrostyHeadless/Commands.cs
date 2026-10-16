@@ -51,7 +51,19 @@ namespace FrostyHeadless
                 case "res":
                     {
                         RuntimeState st = Boot.EnsureFullBoot(cli);
-                        return ResSearch(cli, st, Console.Out);
+                        switch (cli.Verb)
+                        {
+                            case "search": return ResSearch(cli, st, Console.Out);
+                            case "get": return ResGet(cli, st, Console.Out);
+                            case "export": return ResExportCmd(cli, st);
+                        }
+                        break;
+                    }
+
+                case "types":
+                    {
+                        Boot.EnsureFullBoot(cli);
+                        return TypesSchema(cli, Console.Out);
                     }
             }
             throw new CliException(1, "未知的命令组合: " + cli.Noun + " " + cli.Verb);
@@ -193,8 +205,22 @@ namespace FrostyHeadless
 
         internal static int EbxGet(Cli cli, RuntimeState st, TextWriter tw)
         {
-            string name = cli.Require("name");
-            EbxAssetEntry entry = RequireEbxEntry(st, name);
+            EbxAssetEntry entry;
+            string guidStr = cli.Get("guid");
+            if (!string.IsNullOrEmpty(guidStr))
+            {
+                // 按 guid 精确取（ebx get 的引用链跟随入口：PointerRef external 的 fileGuid/classGuid）
+                Guid g;
+                if (!Guid.TryParse(guidStr, out g))
+                    throw new CliException(1, "guid 无效: " + guidStr);
+                entry = st.AssetManager.GetEbxEntry(g);
+                if (entry == null)
+                    throw new CliException(2, "找不到 ebx 资产 (guid=" + guidStr + ")");
+            }
+            else
+            {
+                entry = RequireEbxEntry(st, cli.Require("name"));
+            }
             EbxAsset asset = RequireEbxAsset(st, entry);
             EbxJson.WriteAsset(new JsonWriter(tw), st, entry, asset);
             return 0;
@@ -323,6 +349,161 @@ namespace FrostyHeadless
         }
 
         // ---------------------------------------------------------------- res
+
+        /// <summary>按 rid（16 位十六进制）或名字解析单个 res 资源。</summary>
+        private static ResAssetEntry ResolveResEntry(RuntimeState st, Cli cli)
+        {
+            string ridStr = cli.Get("rid");
+            if (!string.IsNullOrEmpty(ridStr))
+            {
+                ulong rid;
+                if (!ulong.TryParse(ridStr.Trim(), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rid))
+                    throw new CliException(1, "rid 无效（应为 16 位十六进制）: " + ridStr);
+                ResAssetEntry r = st.AssetManager.GetResEntry(rid);
+                if (r == null)
+                    throw new CliException(2, "找不到 res 资源 (rid=" + ridStr + ")");
+                return r;
+            }
+            string name = cli.Require("name");
+            ResAssetEntry entry = null;
+            foreach (ResAssetEntry r in st.AssetManager.EnumerateRes())
+            {
+                if (r.Name != null && r.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    entry = r;
+                    break;
+                }
+            }
+            if (entry == null)
+                throw new CliException(2, "找不到 res 资源: " + name);
+            return entry;
+        }
+
+        /// <summary>单个 res 的元信息；贴图附带尺寸/格式/mip 链（读取 chunk 元数据，不解码像素）。</summary>
+        internal static int ResGet(Cli cli, RuntimeState st, TextWriter tw)
+        {
+            ResAssetEntry r = ResolveResEntry(st, cli);
+
+            JsonWriter jw = new JsonWriter(tw);
+            jw.BeginObject();
+            jw.Key("profile"); jw.String(st.Profile);
+            jw.Key("name"); jw.String(r.Name);
+            jw.Key("type"); jw.String(r.Type);
+            jw.Key("rid"); jw.String(r.ResRid.ToString("X16"));
+            jw.Key("sha1"); jw.String(r.Sha1.ToString());
+            jw.Key("size"); jw.Number(r.Size);
+
+            if (r.Type != null && r.Type.Equals("Texture", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    FrostySdk.Resources.Texture tex = st.AssetManager.GetResAs<FrostySdk.Resources.Texture>(r);
+                    if (tex != null)
+                    {
+                        jw.Key("texture");
+                        jw.BeginObject();
+                        jw.Key("width"); jw.Number(tex.Width);
+                        jw.Key("height"); jw.Number(tex.Height);
+                        jw.Key("pixelFormat"); jw.String(tex.PixelFormat);
+                        jw.Key("mipCount"); jw.Number(tex.MipCount);
+                        jw.Key("firstMip"); jw.Number(tex.FirstMip);
+                        jw.Key("textureType"); jw.String(tex.Type.ToString());
+                        jw.Key("sliceCount"); jw.Number(tex.SliceCount);
+                        jw.EndObject();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    jw.Key("textureError"); jw.String(ex.Message);
+                }
+            }
+
+            jw.EndObject();
+            jw.Flush();
+            return 0;
+        }
+
+        /// <summary>CLI 导出：字节到 stdout，或 --out 落盘（走物理路径防线）。</summary>
+        internal static int ResExportCmd(Cli cli, RuntimeState st)
+        {
+            ResAssetEntry r = ResolveResEntry(st, cli);
+            byte[] data;
+            string contentType;
+            ResExport.Export(st, r, cli.Get("format"), out data, out contentType);
+
+            string outPath = cli.Get("out");
+            if (string.IsNullOrEmpty(outPath))
+            {
+                using (Stream so = Console.OpenStandardOutput())
+                {
+                    so.Write(data, 0, data.Length);
+                    so.Flush();
+                }
+                return 0;
+            }
+
+            // 只读防线（与 ebx xml --out 相同）：词法规范化 → 物理路径解析比对黑名单 → 写物理路径
+            string full;
+            try { full = Path.GetFullPath(outPath); }
+            catch (Exception ex) { throw new CliException(1, "--out 路径无效: " + ex.Message); }
+            string canonical;
+            try { canonical = PathGuard.Canonicalize(full); }
+            catch (Exception ex)
+            {
+                throw new GuardException("无法解析输出路径的物理路径，拒绝写入（fail-closed）: " + full + " — " + ex.Message);
+            }
+            if (PathGuard.IsBlocked(canonical, st.BlockedRoots))
+                throw new GuardException("拒绝写入游戏/Steam 目录: " + canonical);
+
+            string dir = Path.GetDirectoryName(canonical);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllBytes(canonical, data);
+
+            JsonWriter jw = new JsonWriter(Console.Out);
+            jw.BeginObject();
+            jw.Key("written"); jw.String(canonical);
+            jw.Key("bytes"); jw.Number(data.Length);
+            jw.Key("contentType"); jw.String(contentType);
+            jw.EndObject();
+            jw.Flush();
+            return 0;
+        }
+
+        // ---------------------------------------------------------------- types
+
+        /// <summary>ebx 类型 schema：字段名/字段类型/transient 标记（TypeLibrary 的 EbxClasses 动态类型）。</summary>
+        internal static int TypesSchema(Cli cli, TextWriter tw)
+        {
+            string name = cli.Require("name");
+            Type t = TypeLibrary.GetType(name);
+            if (t == null)
+                throw new CliException(2, "未知类型: " + name);
+
+            PropertyInfo[] props = t.GetProperties(BindingFlags.Instance | BindingFlags.Public);
+            Array.Sort(props, delegate (PropertyInfo a, PropertyInfo b) { return a.MetadataToken.CompareTo(b.MetadataToken); });
+
+            JsonWriter jw = new JsonWriter(tw);
+            jw.BeginObject();
+            jw.Key("name"); jw.String(t.Name);
+            jw.Key("baseType"); jw.String(t.BaseType == null ? null : t.BaseType.Name);
+            jw.Key("fields");
+            jw.BeginArray();
+            foreach (PropertyInfo pi in props)
+            {
+                if (pi.GetIndexParameters().Length > 0) continue;
+                jw.BeginObject();
+                jw.Key("name"); jw.String(pi.Name);
+                jw.Key("type"); jw.String(pi.PropertyType.Name);
+                jw.Key("isTransient"); jw.Bool(pi.GetCustomAttribute<FrostySdk.Attributes.IsTransientAttribute>() != null);
+                jw.EndObject();
+            }
+            jw.EndArray();
+            jw.EndObject();
+            jw.Flush();
+            return 0;
+        }
+
+        // ---------------------------------------------------------------- res search
 
         /// <summary>
         /// res 资源检索（贴图/网格等二进制资源的元信息；名字子串 + res 类型名子串过滤）。

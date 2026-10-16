@@ -278,8 +278,11 @@ namespace FrostyHeadless
             Console.WriteLine("==============================================================");
             Console.WriteLine("  已加载: " + st.Profile + "  (" + ProfilesLibrary.DisplayName + ")");
             Console.WriteLine("  游戏目录: " + st.GamePath);
-            Console.WriteLine("  GET /status | /profiles | /ebx/search | /ebx/get | /ebx/xml");
-            Console.WriteLine("  GET /ebx/deps | /bundles/list | /bundle/info | /res/search");
+            Console.WriteLine("  GET /status | /profiles | /load?profile=<名>");
+            Console.WriteLine("  GET /ebx/search | /ebx/get?name=&guid= | /ebx/xml | /ebx/deps");
+            Console.WriteLine("  GET /bundles/list | /bundle/info | /res/search | /res/get?rid=");
+            Console.WriteLine("  GET /res/export?name=&format=png|dds|raw | /types/schema?name=");
+            Console.WriteLine("  GET /shutdown 用完关闭（AI/脚本生命周期管理）");
             Console.WriteLine("==============================================================");
             Console.WriteLine();
         }
@@ -322,6 +325,22 @@ namespace FrostyHeadless
                 return WriteJson(ctx.Response, 200, tw => Commands.ProfilesList(cli, tw));
             if (path == "/load")
                 return HandleLoad(ctx, cli, ss, q);
+            if (path == "/shutdown")
+            {
+                // 生命周期端点（供 AI/脚本用完关闭）：停监听 → 主循环退出 → 进程优雅结束。
+                // 仅监听 127.0.0.1，且只读服务器无状态可丢（重启即恢复）。
+                WriteJson(ctx.Response, 200, tw =>
+                {
+                    JsonWriter jw = new JsonWriter(tw);
+                    jw.BeginObject();
+                    jw.Key("shuttingDown"); jw.Bool(true);
+                    jw.EndObject();
+                    jw.Flush();
+                });
+                Console.Error.WriteLine("[INFO] 收到 /shutdown，停止服务器。");
+                try { listener.Stop(); } catch { }
+                return 200;
+            }
 
             // 以下端点需要已加载游戏
             RuntimeState st;
@@ -354,6 +373,15 @@ namespace FrostyHeadless
 
                 case "/res/search":
                     return WriteJson(ctx.Response, 200, tw => Commands.ResSearch(ForQuery("res", "search", q), st, tw));
+
+                case "/res/get":
+                    return WriteJson(ctx.Response, 200, tw => Commands.ResGet(ForQuery("res", "get", q), st, tw));
+
+                case "/res/export":
+                    return WriteRes(ctx.Response, st, q);
+
+                case "/types/schema":
+                    return WriteJson(ctx.Response, 200, tw => Commands.TypesSchema(ForQuery("types", "schema", q), tw));
 
                 default:
                     return WriteError(ctx.Response, 404, 2, "未知路径: " + path + "（接口清单见 /status 或启动横幅）");
@@ -496,6 +524,58 @@ namespace FrostyHeadless
             }
             catch (CliException ex) { return WriteError(resp, MapStatus(ex.ExitCode), ex.ExitCode, ex.Message); }
             catch (GuardException ex) { return WriteError(resp, 403, ex.ExitCode, ex.Message); }
+        }
+
+        /// <summary>/res/export?name=（或 rid=）&amp;format=png|dds|raw：二进制响应体（贴图 PNG/DDS、任意 res 原始流）。零落盘。</summary>
+        private static int WriteRes(HttpListenerResponse resp, RuntimeState st, NameValueCollection q)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(q["name"]) && string.IsNullOrEmpty(q["rid"]))
+                    return WriteError(resp, 400, 1, "缺少必选参数: name 或 rid");
+                ResAssetEntry r = null;
+                if (!string.IsNullOrEmpty(q["rid"]))
+                {
+                    // 按 rid 解析（引用链跟随），名字仅作后备
+                    try { r = FindResByRid(st, q["rid"]); }
+                    catch (CliException ex) { return WriteError(resp, MapStatus(ex.ExitCode), ex.ExitCode, ex.Message); }
+                }
+                else
+                {
+                    foreach (ResAssetEntry e in st.AssetManager.EnumerateRes())
+                    {
+                        if (e.Name != null && e.Name.Equals(q["name"], StringComparison.OrdinalIgnoreCase))
+                        {
+                            r = e;
+                            break;
+                        }
+                    }
+                    if (r == null)
+                        return WriteError(resp, 404, 2, "找不到 res 资源: " + q["name"]);
+                }
+
+                byte[] data;
+                string contentType;
+                ResExport.Export(st, r, q["format"], out data, out contentType);
+                resp.StatusCode = 200;
+                resp.ContentType = contentType;
+                resp.Headers["Access-Control-Allow-Origin"] = "*";
+                resp.OutputStream.Write(data, 0, data.Length);
+                return 200;
+            }
+            catch (CliException ex) { return WriteError(resp, MapStatus(ex.ExitCode), ex.ExitCode, ex.Message); }
+            catch (GuardException ex) { return WriteError(resp, 403, ex.ExitCode, ex.Message); }
+        }
+
+        private static ResAssetEntry FindResByRid(RuntimeState st, string ridStr)
+        {
+            ulong rid;
+            if (!ulong.TryParse(ridStr.Trim(), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rid))
+                throw new CliException(1, "rid 无效（应为 16 位十六进制）: " + ridStr);
+            ResAssetEntry r = st.AssetManager.GetResEntry(rid);
+            if (r == null)
+                throw new CliException(2, "找不到 res 资源 (rid=" + ridStr + ")");
+            return r;
         }
 
         private static int MapStatus(int cliCode)

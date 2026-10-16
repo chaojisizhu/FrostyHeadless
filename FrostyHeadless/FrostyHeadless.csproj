@@ -34,6 +34,15 @@
       <HintPath>..\FrostyEditor\FrostyHash.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- DDSHeader.ExtendedHeader 的枚举类型（ResExport.cs）；运行时经 AssemblyResolve 从安装目录 ThirdParty/ 解析 -->
+    <Reference Include="SharpDX.DXGI">
+      <HintPath>..\FrostyEditor\ThirdParty\SharpDX.DXGI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SharpDX.Direct3D11">
+      <HintPath>..\FrostyEditor\ThirdParty\SharpDX.Direct3D11.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Core" />
   </ItemGroup>
